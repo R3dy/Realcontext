@@ -12,7 +12,7 @@ import type { McpInfo } from "../src/scan.js"
 function fakeSpawn(script: {
   hang?: boolean
   paginate?: boolean
-  toolCounts?: [number, number] // [first page, second page]
+  toolCounts?: number[] // [first page] or [first page, second page] when paginating
   emitError?: Error
 }): { impl: ProbeOptions["spawnImpl"]; requests: string[]; spawnedFor: string[] } {
   const requests: string[] = []

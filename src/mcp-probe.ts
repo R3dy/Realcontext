@@ -33,6 +33,7 @@ export interface MinimalProcess {
   stdout: EventEmitter
   stderr: EventEmitter
   on(event: string, cb: (...args: unknown[]) => void): void
+  emit(event: string, ...args: unknown[]): boolean
   kill(signal?: string): void
 }
 
