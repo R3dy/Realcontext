@@ -16,13 +16,38 @@ import { scanAll, defaultPaths } from "./scan.js"
 import { captureSystem, latestCapture } from "./capture.js"
 import { loadConfig, readUsage } from "./usage.js"
 import { buildBreakdown, renderDetailed, renderStatusLine } from "./report.js"
+import { probeMcpServers, type McpServerMeasurement } from "./mcp-probe.js"
 
 export const RealcontextPlugin: Plugin = async ({ $, directory }) => {
   const paths = defaultPaths(directory)
   const cfg = loadConfig(paths.globalConfigDir)
   let lastSessionID: string | null = null
 
-  const buildNow = async (sessionID: string | null) => {
+  // §4.4 wiring contract: MCP probe is NEVER on the message-event hot path.
+  // One background fill at init + single-flight TTL refresh on session.idle.
+  // writeStatus stays cache-only (renders whatever mcpMeasurements holds).
+  const MCP_TTL_MS = 10 * 60_000
+  let mcpMeasurements: McpServerMeasurement[] | null = null
+  let mcpInFlight = false
+  let mcpLastRefresh = 0
+  const refreshMcp = () => {
+    if (mcpInFlight) return
+    mcpInFlight = true
+    probeMcpServers(scanAll(paths).mcps)
+      .then((m) => {
+        mcpMeasurements = m
+        mcpLastRefresh = Date.now()
+      })
+      .catch(() => {
+        /* advisory [2]-C2: background probes never reject into the host */
+      })
+      .finally(() => {
+        mcpInFlight = false
+      })
+  }
+  refreshMcp()
+
+  const buildNow = async (sessionID: string | null, measurements?: McpServerMeasurement[] | null) => {
     const scan = scanAll(paths)
     const capture = latestCapture()
     const sc = sessionID ? await readUsage(sessionID) : null
@@ -32,6 +57,7 @@ export const RealcontextPlugin: Plugin = async ({ $, directory }) => {
       usage: sc?.usage ?? null,
       config: cfg,
       model: sc?.model,
+      mcpMeasurements: measurements ?? mcpMeasurements,
     })
   }
 
@@ -92,6 +118,9 @@ export const RealcontextPlugin: Plugin = async ({ $, directory }) => {
           lastSessionID
         if (typeof sid === "string" && sid) lastSessionID = sid
         if (type === "session.idle" || type === "message.updated" || type === "message.part.updated") {
+          if (type === "session.idle" && Date.now() - mcpLastRefresh > MCP_TTL_MS) {
+            refreshMcp() // single-flight, .catch()-guarded — never on the hot path
+          }
           await writeStatus(lastSessionID)
         }
       } catch {
@@ -110,7 +139,9 @@ export const RealcontextPlugin: Plugin = async ({ $, directory }) => {
           const mode = (args?.mode || "detailed").toLowerCase()
           const sessionID =
             (context as { sessionID?: string } | undefined)?.sessionID ?? lastSessionID
-          const bd = await buildNow(sessionID ?? null)
+          // §4.4: context_report is user-invoked → probe awaited (one-shot)
+          const fresh = await probeMcpServers(scanAll(paths).mcps).catch(() => mcpMeasurements)
+          const bd = await buildNow(sessionID ?? null, fresh)
           if (mode === "summary") return renderStatusLine(bd)
           if (mode === "json") return JSON.stringify(bd, null, 2)
           return renderDetailed(bd)

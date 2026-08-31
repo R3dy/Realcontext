@@ -22,7 +22,11 @@ export interface McpInfo {
   type: "local" | "remote"
   where: "global" | "project"
   command?: string
+  /** raw argv for spawning (probe) — kept separate from the display string */
+  commandArgv?: string[]
   url?: string
+  /** config `enabled` flag — absent means enabled */
+  enabled: boolean
 }
 
 export interface ScanResult {
@@ -168,7 +172,9 @@ export function scanMcps(projectDir: string, globalConfigDir: string): McpInfo[]
         type,
         where,
         command: typeof m.command === "string" ? m.command : Array.isArray(m.command) ? m.command.join(" ") : undefined,
+        commandArgv: Array.isArray(m.command) ? m.command.map(String) : typeof m.command === "string" ? m.command.split(/\s+/).filter(Boolean) : undefined,
         url: typeof m.url === "string" ? m.url : undefined,
+        enabled: m.enabled !== false,
       })
     }
   }
