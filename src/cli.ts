@@ -11,6 +11,7 @@ import { scanAll, defaultPaths } from "./scan.js"
 import { latestCapture } from "./capture.js"
 import { loadConfig, readUsage } from "./usage.js"
 import { buildBreakdown, renderDetailed, renderStatusLine, renderJson } from "./report.js"
+import { probeMcpServers } from "./mcp-probe.js"
 
 /** measured usage for the most recently captured session, if any */
 async function measuredContext(): Promise<{ usage: ReturnType<typeof Object> | null; model?: string } | null> {
@@ -27,8 +28,14 @@ export async function main(argv: string[]): Promise<number> {
   const cfg = loadConfig(paths.globalConfigDir)
   const scan = scanAll(paths)
   const capture = latestCapture()
+  // §4.4 wiring contract: the probe runs for user-invoked report/json only
+  // (one-shot per process, awaited). `status` skips it — cache-only, no spawn.
+  const wantProbe = cmd === "report" || cmd === "json"
+  const mcpMeasurements = wantProbe
+    ? await probeMcpServers(scan.mcps).catch(() => null)
+    : null
   const mc = cmd === "report" ? await measuredContext() : null
-  const bd = buildBreakdown({ scan, capture, usage: mc?.usage ?? null, config: cfg, model: mc?.model })
+  const bd = buildBreakdown({ scan, capture, usage: mc?.usage ?? null, config: cfg, model: mc?.model, mcpMeasurements })
 
   if (args.includes("--json") || cmd === "json") {
     process.stdout.write(renderJson(bd) + "\n")

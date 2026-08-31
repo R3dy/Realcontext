@@ -4,12 +4,28 @@
   "type": "module",
   "license": "MIT",
   "description": "OpenCode plugin: complete visibility into everything taking up context in a session — status split (system prompt / skills / MCPs / rules / conversation) + granular /context drill-down.",
-  "keywords": ["opencode", "opencode-plugin", "context", "tokens", "statusline", "context-window"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "context",
+    "tokens",
+    "statusline",
+    "context-window"
+  ],
   "main": "dist/index.js",
-  "exports": { ".": "./dist/index.js" },
-  "bin": { "realcontext": "dist/cli.js" },
-  "files": ["dist", "README.md"],
-  "engines": { "node": ">=18" },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "realcontext": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsup",
     "test": "vitest run",

@@ -9,6 +9,7 @@ import type { ScanResult } from "./scan.js"
 import { attribute, type Capture } from "./capture.js"
 import type { RealcontextConfig } from "./usage.js"
 import { contextLimit } from "./usage.js"
+import type { McpServerMeasurement } from "./mcp-probe.js"
 
 export interface BuildInput {
   scan: ScanResult
@@ -16,6 +17,13 @@ export interface BuildInput {
   usage: UsageInfo | null
   config: RealcontextConfig
   model?: string
+  /**
+   * Live MCP tool-schema measurements (Issue #1 wiring contract §4.4):
+   * `buildBreakdown` stays synchronous — the caller probes (CLI report/json,
+   * plugin init background fill, context_report) and injects the result.
+   * Absent/null → MCP rows render honestly as "not measured this run".
+   */
+  mcpMeasurements?: McpServerMeasurement[] | null
 }
 
 export function buildBreakdown(input: BuildInput): Breakdown {
@@ -74,38 +82,57 @@ export function buildBreakdown(input: BuildInput): Breakdown {
       note: s.description ? "estimate of name+description metadata" : "no frontmatter description",
     }))
   const skillBodyTokens = scan.skills.reduce((acc, s) => acc + s.bodyTokens, 0)
+  // Issue #1 fix: component.tokens = RESIDENT metadata only. Skill bodies load
+  // only on invoke — they are DISPLAYED as available capacity but EXCLUDED from
+  // the total (they were inflating estimated totals by ~20.8k on real boxes).
   const skillItems: ItemDetail[] = [...skillMetaItems]
   if (skillBodyTokens > 0) {
     skillItems.push({
-      label: "skill bodies (loaded only on invoke)",
+      label: "skill bodies — available on invoke (not in total)",
       tokens: skillBodyTokens,
       measured: false,
-      note: `${scan.skills.length} skills on disk; bodies enter context when a skill is invoked`,
+      note: `${scan.skills.length} skills on disk; loads only on invoke — EXCLUDED from totals`,
     })
   }
   components.push({
     id: "skills",
-    label: "Skills",
+    label: "Skills (resident metadata)",
     kind: "skills",
-    tokens: sumItems(skillItems),
+    tokens: sumItems(skillMetaItems),
     measured: attr !== null && attr.skillsAttributed.length > 0,
     items: skillItems,
   })
 
-  // --- MCP servers ---
-  const mcpItems: ItemDetail[] = scan.mcps.map((m) => ({
-    label: m.name,
-    path: m.command || m.url,
-    tokens: 0,
-    measured: false,
-    note: `${m.type} (${m.where}); tool schemas not hook-observable — counted in the tools residual`,
-  }))
+  // --- MCP servers (Issue #1: measured per enabled server, never hard-coded 0) ---
+  const mcpItems: ItemDetail[] = scan.mcps.map((m) => {
+    const base = { label: m.name, path: m.command || m.url }
+    if (m.enabled === false) {
+      return { ...base, tokens: 0, measured: false, note: "disabled — 0 in context" }
+    }
+    const mm = input.mcpMeasurements?.find((x) => x.name === m.name)
+    if (!mm || !mm.ok) {
+      return {
+        ...base,
+        tokens: 0,
+        measured: false,
+        note: mm?.reason ? `not measured this run — ${mm.reason}` : "not measured this run",
+      }
+    }
+    return {
+      ...base,
+      tokens: mm.tokens ?? 0,
+      measured: true,
+      note: mm.toolCount != null
+        ? `tools/list measured: ${mm.toolCount} tools — chars/4 over real schema bytes`
+        : "chars/4 over real schema bytes",
+    }
+  })
   components.push({
     id: "mcp",
-    label: "MCP servers",
+    label: "MCP tool schemas",
     kind: "mcp",
-    tokens: 0,
-    measured: false,
+    tokens: sumItems(mcpItems),
+    measured: mcpItems.some((i) => i.measured),
     items: mcpItems,
   })
 
@@ -125,11 +152,11 @@ export function buildBreakdown(input: BuildInput): Breakdown {
     items: pluginItems,
   })
 
-  // --- conversation + tool schemas (needs measured usage) ---
+  // --- conversation + tools (needs measured usage) ---
   if (usage) {
     const totalIn = usage.inputTokens + usage.cacheRead + usage.cacheWrite
     const systemSide = components
-      .filter((c) => ["system", "rules", "skills"].includes(c.kind))
+      .filter((c) => ["system", "rules", "skills", "mcp"].includes(c.kind))
       .reduce((acc, c) => acc + c.tokens, 0)
     const residual = Math.max(0, totalIn - systemSide)
     // split residual: assume conversation dominates; tools get a nominal floor
@@ -152,13 +179,13 @@ export function buildBreakdown(input: BuildInput): Breakdown {
     })
     components.push({
       id: "tools",
-      label: "Tool schemas (built-in + MCP)",
+      label: "Tool schemas (built-in residual)",
       kind: "tools",
       tokens: toolsEst,
       measured: false,
       items: [
         {
-          label: "residual estimate — schemas ride the provider tools param, invisible to hooks",
+          label: "residual estimate — built-in schemas ride the provider tools param, invisible to hooks (MCP rows above are measured)",
           tokens: 0,
           measured: false,
         },
@@ -166,6 +193,31 @@ export function buildBreakdown(input: BuildInput): Breakdown {
     })
     return finalize(components, totalIn, "measured", model, limit, usage, capture)
   }
+
+  // Issue #1 (DRIFT-3 / INV-3): no usage snapshot → conversation/tools are NOT
+  // silently omitted. Component ids stay present (renderStatusLine contract)
+  // with explicit not-measurable rows; the estimated total covers the
+  // attributed system-side only, and the renderer says so.
+  components.push({
+    id: "conversation",
+    label: "Conversation (messages + tool results)",
+    kind: "conversation",
+    tokens: 0,
+    measured: false,
+    items: [
+      { label: "not measurable this capture — no usage snapshot", tokens: 0, measured: false },
+    ],
+  })
+  components.push({
+    id: "tools",
+    label: "Tool schemas (built-in residual)",
+    kind: "tools",
+    tokens: 0,
+    measured: false,
+    items: [
+      { label: "not measurable this capture — provider tools param invisible to hooks", tokens: 0, measured: false },
+    ],
+  })
 
   const est = components.reduce((acc, c) => acc + c.tokens, 0)
   return finalize(components, est, "estimated", model, limit, null, capture)
@@ -227,6 +279,9 @@ export function renderDetailed(bd: Breakdown): string {
     )
   }
   if (bd.capture) lines.push(`capture: session ${bd.capture.sessionID} @ ${bd.capture.ts}`)
+  if (bd.totalSource === "estimated") {
+    lines.push("note: conversation + tools not measurable this capture — total covers attributed system-side only")
+  }
   lines.push("")
   lines.push("COMPONENT                          TOKENS    SRC       DETAIL")
   for (const c of bd.components) {
